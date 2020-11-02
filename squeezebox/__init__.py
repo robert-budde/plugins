@@ -25,6 +25,7 @@ import urllib.error
 import urllib.parse
 import lib.connection
 import re
+import time
 from lib.model.smartplugin import SmartPlugin
 from bin.smarthome import VERSION
 
@@ -43,6 +44,7 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
             self._val = {}
             self._obj = {}
             self._init_cmds = []
+            self._listen = False
         except Exception:
             self._init_complete = False
             return
@@ -157,13 +159,26 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
 
             # special handling for bool-types who need other comands or values
             # to behave intuitively
+            if isinstance(source, str):
+                newsource = source.split(".")[-1:][0]
+            else:
+                newsource = 'None'
+            condition0 = len(cmd) > 1
+            condition1 = condition0 and cmd[1] == 'playlist' and cmd[2] in ['shuffle', 'repeat']
+            condition2 = condition0 and cmd[1] == 'playlist' and cmd[2] == 'shuffle' and caller == 'on_change' and newsource == 'shuffle'
+            condition3 = condition0 and cmd[1] == 'playlist' and cmd[2] == 'repeat' and caller == 'on_change' and newsource == 'repeat'
+
+            if (len(cmd) >= 2) and not item() and (condition2 or condition3):
+                # If shuffle or playlist item got updates by on_change nothing should happen to prevent endless loops
+                self.logger.debug("Command {0} ignored to prevent repeat/shuffle command loops".format(cmd))
+                return
             if (len(cmd) >= 2) and not item():
                 if (cmd[1] == 'play'):
-                    # if 'play' was set to false, send 'stop' to allow
+                    # if 'play' was set to false, send 'pause' to allow
                     # single-item-operation
-                    cmd[1] = 'stop'
+                    cmd[1] = 'pause'
                     value = 1
-                if (cmd[1] == 'playlist') and (cmd[2] in ['shuffle', 'repeat']):
+                if condition1:
                     # if a boolean item of [...] was set to false, send '0' to disable the option whatsoever
                     # replace cmd[3], as there are fixed values given and
                     # filling in 'value' is pointless
@@ -172,12 +187,21 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
                        for cmd_str in cmd))
 
     def _send(self, cmd):
-        # replace german umlauts
-        repl = (('%FC', '%C3%BC'), ('%F6', '%C3%B6'), ('%E4', '%C3%A4'), ('%DC', '%C3%9C'), ('%D6', '%C3%96'), ('%C4', '%C3%84'))
-        for r in repl:
-            cmd = cmd.replace(*r)
-        self.logger.debug("Sending request: {0}".format(cmd))
-        self.send(bytes(cmd + '\r\n', 'utf-8'))
+        if self.connected:
+            # replace german umlauts
+            repl = (('%FC', '%C3%BC'), ('%F6', '%C3%B6'), ('%E4', '%C3%A4'), ('%DC', '%C3%9C'), ('%D6', '%C3%96'), ('%C4', '%C3%84'))
+            for r in repl:
+                cmd = cmd.replace(*r)
+            i = 0
+            while not cmd == "listen 1" and self._listen is False:
+                self.logger.debug("Waiting to send command {} as connection is not yet established. Count: {}/10".format(cmd, i))
+                i += 1
+                time.sleep(1)
+                if i >= 10:
+                    self.logger.warning("10 seconds wait time for sending {} is over. Sending it now.".format(cmd))
+                    break
+            self.logger.debug("Sending request: {0}".format(cmd))
+            self.send(bytes(cmd + '\r\n', 'utf-8'))
 
     def found_terminator(self, response):
         data = [urllib.parse.unquote(data_str)
@@ -189,8 +213,10 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
                 value = int(data[1])
                 if (value == 1):
                     self.logger.info("Listen-mode enabled")
+                    self._listen = True
                 else:
-                    self.logger.info("Listen-mode disabled")
+                    self.logger.info("Listen-mode disabled. The plugin won't receive any info!")
+                    self._listen = False
 
             if self._check_mac(data[0]):
                 if (data[1] == 'time' and (data[2].startswith('+') or data[2].startswith('-'))):
@@ -208,10 +234,14 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
                 elif (data[1] == 'stop'):
                     self._update_items_with_data([data[0], 'play', '0'])
                     self._update_items_with_data([data[0], 'stop', '1'])
+                    self._update_items_with_data([data[0], 'pause', '0'])
                     self._update_items_with_data([data[0], 'mode', 'stop'])
                     self._send(data[0] + ' time ?')
                     return
                 elif (data[1] == 'pause'):
+                    self._update_items_with_data([data[0], 'play', '0'])
+                    self._update_items_with_data([data[0], 'stop', '0'])
+                    self._update_items_with_data([data[0], 'pause', '1'])
                     self._update_items_with_data([data[0], 'mode', 'pause'])
                     self._send(data[0] + ' mixer muting ?')
                     self._send(data[0] + ' time ?')
@@ -234,7 +264,7 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
                     self._update_items_with_data([data[0], 'mute', '1'])
                     data[-1] = data[-1][1:]
                 elif (data[1] == 'playlist'):
-                    if (data[2] == 'play'):
+                    if (data[2] == 'play' and data[3] == '1'):
                         self._update_items_with_data([data[0], 'play', '1'])
                         self._update_items_with_data([data[0], 'stop', '0'])
                         self._update_items_with_data([data[0], 'pause', '0'])
@@ -250,7 +280,10 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
                         self._update_items_with_data([data[0], 'mode', 'stop'])
                         self._send(data[0] + ' time ?')
                         return
-                    elif (data[2] == 'pause'):
+                    elif (data[2] == 'pause' and data[3] == '1'):
+                        self._update_items_with_data([data[0], 'play', '0'])
+                        self._update_items_with_data([data[0], 'stop', '0'])
+                        self._update_items_with_data([data[0], 'pause', '1'])
                         self._update_items_with_data([data[0], 'mode', 'pause'])
                         self._send(data[0] + ' mixer muting ?')
                         self._send(data[0] + ' time ?')
@@ -294,7 +327,9 @@ class Squeezebox(SmartPlugin,lib.connection.Client):
 
     def _update_items_with_data(self, data):
         cmd = ' '.join(data_str for data_str in data[:-1])
+
         if (cmd in self._val):
+
             for item in self._val[cmd]['items']:
                 if re.match("[+-][0-9]+$", data[-1]) and not isinstance(item(), str):
                     data[-1] = int(data[-1]) + item()

@@ -28,6 +28,7 @@ from . import StateEngineCurrent
 from . import StateEngineValue
 from lib.item import Items
 from lib.shtime import Shtime
+import time
 
 
 # Class representing a blind item
@@ -55,6 +56,11 @@ class SeItem:
     def sh(self):
         return self.__sh
 
+    # return instance of smartplugin class
+    @property
+    def se_plugin(self):
+        return self.__se_plugin
+
     # return instance of logger class
     @property
     def logger(self):
@@ -76,14 +82,27 @@ class SeItem:
     def lastconditionset_name(self):
         return self.__lastconditionset_item_name.property.value
 
+    @property
+    def action_in_progress(self):
+        return self.__action_in_progress
+
+    @property
+    def update_in_progress(self):
+        return self.__update_in_progress
+
+    @property
+    def stateeval_in_progress(self):
+        return self.__stateeval_in_progress
+
     # Constructor
     # smarthome: instance of smarthome.py
     # item: item to use
-    def __init__(self, smarthome, item):
+    def __init__(self, smarthome, item, se_plugin):
         self.items = Items.get_instance()
         self.shtime = Shtime.get_instance()
         self.__sh = smarthome
         self.__item = item
+        self.__se_plugin = se_plugin
         try:
             self.__id = self.__item.property.path
         except Exception:
@@ -120,11 +139,15 @@ class SeItem:
         self.__repeat_actions = StateEngineValue.SeValue(self, "Repeat actions if state is not changed", False, "bool")
         self.__repeat_actions.set_from_attr(self.__item, "se_repeat_actions", True)
 
+        self._initstate = None
+        self._initactionname = None
         self.__update_trigger_item = None
         self.__update_trigger_caller = None
         self.__update_trigger_source = None
         self.__update_trigger_dest = None
         self.__update_in_progress = False
+        self.__stateeval_in_progress = False
+        self.__action_in_progress = []
         self.__update_original_item = None
         self.__update_original_caller = None
         self.__update_original_source = None
@@ -162,7 +185,7 @@ class SeItem:
             first_run = self.shtime.now() + datetime.timedelta(seconds=startup_delay)
             scheduler_name = self.__id + "-Startup Delay"
             value = {"item": self.__item, "caller": "Init"}
-            self.__sh.scheduler.add(scheduler_name, self.__startup_delay_callback, value=value, next=first_run)
+            self.__se_plugin.scheduler_add(scheduler_name, self.__startup_delay_callback, value=value, next=first_run)
         elif startup_delay == -1:
             self.__startup_delay_over = True
             self.__add_triggers()
@@ -171,6 +194,18 @@ class SeItem:
 
     def __repr__(self):
         return self.__id
+
+    def set_action_state(self, value, listaction):
+        if listaction == 'add':
+            # self.__logger.debug("Adding {} to action list", value)
+            self.__action_in_progress.append(value)
+        elif value in self.__action_in_progress:
+            # self.__logger.debug("Removing {} from action list", value)
+            self.__action_in_progress.reverse()
+            self.__action_in_progress.remove(value)
+            self.__action_in_progress.reverse()
+        else:
+            self.__logger.debug("Nothing to do with {} (listaction: {}).", value, listaction)
 
     def updatetemplates(self, template, value):
         if value is None:
@@ -183,10 +218,12 @@ class SeItem:
             for nestedkey in keys[:-1]:
                 dic = dic.setdefault(nestedkey, {})
             dic[keys[-1]] = val
+
         def _nested_test(dic, keys):
             for nestedkey in keys[:-2]:
                 dic = dic.setdefault(nestedkey, {})
             return dic[keys[-2]]
+
         if isinstance(key, list):
             try:
                 _nested_test(self.__webif_infos, key)
@@ -205,12 +242,24 @@ class SeItem:
         if self.__update_in_progress or not self.__startup_delay_over:
             return
 
+        i = 0
+        item_id = item.property.path if item is not None else "(no item)"
+        while len(self.__action_in_progress) > 0:
+            self.__logger.info("Action {} is still running. Postponing current state evaluation for {} for one second", self.__action_in_progress, item_id)
+            i += 1
+            time.sleep(1)
+            if i >= 10:
+                self.__logger.warning("10 seconds wait time for item {} is over. Running state evaluation now.", item_id)
+                break
+
         self.__update_in_progress = True
+        self.__stateeval_in_progress = True
 
         self.__logger.update_logfile()
-        self.__logger.header("Update state of item {0}".format(self.__name))
+        postponed = " (postponed {}s)".format(i) if i > 0 else ""
+        i = 0
+        self.__logger.header("Update state of item {0}{1}".format(self.__name, postponed))
         if caller:
-            item_id = item.property.path if item is not None else "(no item)"
             self.__logger.debug("Update triggered by {0} (item={1} source={2} dest={3})", caller, item_id, source, dest)
 
         # Find out what initially caused the update to trigger if the caller is "Eval"
@@ -225,6 +274,7 @@ class SeItem:
         if (cond1 and cond1_2) or (cond2 and cond2_2):
             self.__logger.debug("Ignoring changes from {0}", StateEngineDefaults.plugin_identification)
             self.__update_in_progress = False
+            self.__stateeval_in_progress = False
             return
 
         self.__update_trigger_item = item.property.path
@@ -259,8 +309,10 @@ class SeItem:
             result = self.__update_check_can_enter(state)
             # New state is different from last state
             if result is False and last_state == state and StateEngineDefaults.instant_leaveaction is True:
-                self.__logger.info("Leaving {0} ('{1}')", last_state.id, last_state.name)
+                self.__logger.info("Leaving {0} ('{1}'). Running actions immediately.", last_state.id, last_state.name)
+                self.__stateeval_in_progress = False
                 last_state.run_leave(self.__repeat_actions.get())
+                self.__stateeval_in_progress = True
                 _leaveactions_run = True
             if result is True:
                 new_state = state
@@ -279,6 +331,7 @@ class SeItem:
                     self.__logger.info(text, last_state.id, last_state.name, _last_conditionset_id, _last_conditionset_name)
                 last_state.run_stay(self.__repeat_actions.get())
             self.__update_in_progress = False
+            self.__stateeval_in_progress = False
             return
         _last_conditionset_id = self.__lastconditionset_get_id()
         _last_conditionset_name = self.__lastconditionset_get_name()
@@ -289,6 +342,7 @@ class SeItem:
             else:
                 self.__logger.info("Staying at {0} ('{1}') based on conditionset {2} ('{3}')",
                                    new_state.id, new_state.name, _last_conditionset_id, _last_conditionset_name)
+            self.__stateeval_in_progress = False
             # New state is last state
             if self.__laststate_internal_name != new_state.name:
                 self.__laststate_set(new_state)
@@ -302,7 +356,9 @@ class SeItem:
             elif last_state is not None:
                 self.lastconditionset_set(_original_conditionset_id, _original_conditionset_name)
                 self.__logger.info("Leaving {0} ('{1}'). Condition set was: {2}", last_state.id, last_state.name, _original_conditionset_id)
+                self.__stateeval_in_progress = False
                 last_state.run_leave(self.__repeat_actions.get())
+                self.__stateeval_in_progress = True
                 _leaveactions_run = True
             if new_state.conditions.count() == 0:
                 self.lastconditionset_set('', '')
@@ -316,6 +372,7 @@ class SeItem:
                 self.__logger.info("Entering {0} ('{1}') based on conditionset {2} ('{3}')",
                                    new_state.id, new_state.name, _last_conditionset_id, _last_conditionset_name)
             self.__laststate_set(new_state)
+            self.__stateeval_in_progress = False
             new_state.run_enter(self.__repeat_actions.get())
         if _leaveactions_run is True:
             _key_leave = ['{}'.format(last_state.id), 'leave']
@@ -327,6 +384,7 @@ class SeItem:
             #self.__logger.debug('set leave for {} to true', last_state.id)
 
         self.__update_in_progress = False
+        self.__stateeval_in_progress = False
 
     # check if state can be entered after setting state-specific variables
     # state: state to check
@@ -419,9 +477,10 @@ class SeItem:
             self.__item._eval = "1"
 
         # Check scheduler settings and update if requred
-        job = self.__sh.scheduler._scheduler.get(self.id)
+
+        job = self.__sh.scheduler._scheduler.get("items.{}".format(self.id))
         if job is None:
-            # We do not have an scheduler job so there is nothing to check and update
+            # We do not have a scheduler job so there is nothing to check and update
             return
 
         changed = False
@@ -429,28 +488,33 @@ class SeItem:
         # inject value into cycle if required
         if "cycle" in job and job["cycle"] is not None:
             cycle = list(job["cycle"].keys())[0]
+            old_cycle = cycle
             value = job["cycle"][cycle]
             if value is None:
                 value = "1"
                 changed = True
             new_cycle = {cycle: value}
         else:
+            old_cycle = None
             new_cycle = None
 
         # inject value into cron if required
         if "cron" in job and job["cron"] is not None:
             new_cron = {}
+            old_cron = job["cron"]
             for entry, value in job['cron'].items():
                 if value is None:
                     value = 1
                     changed = True
                 new_cron[entry] = value
         else:
+            old_cron = None
             new_cron = None
-
+        self.__logger.info("Old cycle '{}' updated to '{}'. Old cron '{}' updated to '{}'",
+                           old_cycle, new_cycle, old_cron, new_cron)
         # change scheduler settings if cycle or cron have been changed
         if changed:
-            self.__sh.scheduler.change(self.id, cycle=new_cycle, cron=new_cron)
+            self.__sh.scheduler.change("items.{}".format(self.id), cycle=new_cycle, cron=new_cron)
 
     # get triggers in readable format
     def __verbose_triggers(self):
@@ -473,7 +537,8 @@ class SeItem:
         crons = ""
 
         # noinspection PyProtectedMember
-        job = self.__sh.scheduler._scheduler.get(self.__item.id)
+        job = self.__sh.scheduler._scheduler.get("items.{}".format(self.id))
+
         if job is not None:
             if "cycle" in job and job["cycle"] is not None:
                 cycle = list(job["cycle"].keys())[0]
@@ -525,7 +590,7 @@ class SeItem:
         # log states
         for state in self.__states:
             state.write_to_log()
-            state.write_webif()
+            self._initstate = None
     # endregion
 
     # region Methods for CLI commands **********************************************************************************

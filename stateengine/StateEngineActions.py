@@ -21,6 +21,7 @@
 from . import StateEngineAction
 from . import StateEngineTools
 import ast
+import time
 
 
 # Class representing a list of actions
@@ -29,7 +30,9 @@ class SeActions(StateEngineTools.SeItemChild):
     def dict_actions(self):
         result = {}
         for name in self.__actions:
+            self._abitem._initactionname = name
             result.update({name: self.__actions[name].get()})
+            self._abitem._initactionname = None
         return result
 
     # Initialize the set of actions
@@ -328,6 +331,14 @@ class SeActions(StateEngineTools.SeItemChild):
             for name in additional_actions.__actions:
                 actions.append((additional_actions.__actions[name].get_order(), additional_actions.__actions[name]))
         for order, action in sorted(actions, key=lambda x: x[0]):
+            i = 0
+            while len(self._abitem.action_in_progress) > 0:
+                self._log_info("{} is already running. Postponing current action {} with order {} for one second", self._abitem.action_in_progress, action._name, order)
+                i += 1
+                time.sleep(1)
+                if i >= 10:
+                    self._log_warning("10 seconds wait time for action {} is over. Running it now.", action)
+                    break
             action.execute(is_repeat, allow_item_repeat, state)
 
     def get(self):
@@ -348,5 +359,7 @@ class SeActions(StateEngineTools.SeItemChild):
             # noinspection PyProtectedMember
             self._log_info("Action '{0}':", action._name)
             self._log_increase_indent()
+            self._abitem._initactionname = action._name
             action.write_to_logger()
+            self._abitem._initactionname = None
             self._log_decrease_indent()

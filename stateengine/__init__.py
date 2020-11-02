@@ -104,7 +104,7 @@ class StateEngine(SmartPlugin):
         for item in self.items.find_items("se_plugin"):
             if item.conf["se_plugin"] == "active":
                 try:
-                    ab_item = StateEngineItem.SeItem(self.get_sh(), item)
+                    ab_item = StateEngineItem.SeItem(self.get_sh(), item, self)
                     self.__items[ab_item.id] = ab_item
                 except ValueError as ex:
                     self.logger.error("Problem with Item: {0}: {1}".format(item.property.path, ex))
@@ -166,6 +166,10 @@ class StateEngine(SmartPlugin):
         if isinstance(abitem, str):
             abitem = self.__items[abitem]
         webif = StateEngineWebif.WebInterface(self.__sh, abitem)
+        try:
+            os.makedirs(self.path_join(self.get_plugin_dir(), 'webif/static/img/visualisations/'))
+        except OSError as e:
+            pass
         vis_file = self.path_join(self.get_plugin_dir(), 'webif/static/img/visualisations/{}.svg'.format(abitem))
         #self.logger.debug("Getting graph: {}, {}".format(abitem, webif))
         try:

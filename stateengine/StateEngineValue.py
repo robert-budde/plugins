@@ -271,6 +271,7 @@ class SeValue(StateEngineTools.SeItemChild):
                 self._log_debug("{0} from item: {1}", self.__name, self.__item.property.path)
         if self.__eval is not None:
             self._log_debug("{0} from eval: {1}", self.__name, self.__eval)
+            self._log_debug("Currently eval results in {}", self.__get_eval())
         if self.__varname is not None:
             self._log_debug("{0} from variable: {1}", self.__name, self.__varname)
 
@@ -383,15 +384,15 @@ class SeValue(StateEngineTools.SeItemChild):
             self._log_debug("Checking eval: {0}.", self.__eval)
             self._log_increase_indent()
             try:
-                _newvalue = eval(self.__eval)
+                _newvalue = self.__do_cast(eval(self.__eval))
                 if 'eval:{}'.format(self.__eval) in self.__listorder:
                     self.__listorder[self.__listorder.index('eval:{}'.format(self.__eval))] = _newvalue
                 values = _newvalue
-                self._log_decrease_indent()
             except Exception as ex:
                 self._log_info("Problem evaluating '{0}': {1}.", StateEngineTools.get_eval_name(self.__eval), ex)
+                values = None
+            finally:
                 self._log_decrease_indent()
-                return None
         else:
             if isinstance(self.__eval, list):
                 values = []
@@ -408,7 +409,7 @@ class SeValue(StateEngineTools.SeItemChild):
                             stateengine_eval = StateEngineEval.SeEval(self._abitem)
                             se_eval = StateEngineEval.SeEval(self._abitem)
                         try:
-                            _newvalue = eval(val)
+                            _newvalue = self.__do_cast(eval(val))
                             if 'eval:{}'.format(val) in self.__listorder:
                                 self.__listorder[self.__listorder.index('eval:{}'.format(val))] = _newvalue
                             value = _newvalue
@@ -417,27 +418,27 @@ class SeValue(StateEngineTools.SeItemChild):
                             value = None
                     else:
                         try:
-                            _newvalue = val()
+                            _newvalue = self.__do_cast(val())
                             if 'eval:{}'.format(val) in self.__listorder:
                                 self.__listorder[self.__listorder.index('eval:{}'.format(val))] = _newvalue
                             value = _newvalue
                         except Exception as ex:
-                            self._log_info("Problem calling '{0}': {1}.", StateEngineTools.get_eval_name(val), ex)
+                            self._log_info("Problem evaluating '{0}': {1}.", StateEngineTools.get_eval_name(val), ex)
                             value = None
                     if value is not None:
                         values.append(self.__do_cast(value))
                     self._log_decrease_indent()
             else:
-                self._log_debug("Checking eval: {0}.", val)
+                self._log_debug("Checking eval (no str, no list): {0}.", val)
                 try:
                     self._log_increase_indent()
-                    _newvalue = self.__eval()
+                    _newvalue = self.__do_cast(self.__eval())
                     if 'eval:{}'.format(self.__eval) in self.__listorder:
                         self.__listorder[self.__listorder.index('eval:{}'.format(self.__eval))] = _newvalue
                     values = _newvalue
                     self._log_decrease_indent()
                 except Exception as ex:
-                    self._log_info("Problem calling '{0}': {1}.", StateEngineTools.get_eval_name(self.__eval), ex)
+                    self._log_info("Problem evaluating '{0}': {1}.", StateEngineTools.get_eval_name(self.__eval), ex)
                     return None
 
         return values
@@ -475,14 +476,25 @@ class SeValue(StateEngineTools.SeItemChild):
         if isinstance(self.__varname, list):
             values = []
             for var in self.__varname:
-                self._log_info("Checking variable '{0}': {1}.", self.__varname, var)
                 value = self._abitem.get_variable(var)
                 _newvalue = self.__do_cast(value)
+                _newvalue = 'var:{}'.format(self.__varname) if _newvalue == '' else _newvalue
+                if isinstance(_newvalue, str) and 'Unknown variable' in _newvalue:
+                    self._log_warning("There is a problem with your variable: {}", _newvalue)
+                    _newvalue = ''
                 values.append(_newvalue)
                 if 'var:{}'.format(var) in self.__listorder:
+                    self._log_debug("Checking variable in loop '{0}', value {1}, listorder {2}",
+                                    self.__varname, _newvalue, self.__listorder)
                     self.__listorder[self.__listorder.index('var:{}'.format(var))] = _newvalue
         else:
             _newvalue = self._abitem.get_variable(self.__varname)
+            _newvalue = 'var:{}'.format(self.__varname) if _newvalue == '' else _newvalue
+            if isinstance(_newvalue, str) and 'Unknown variable' in _newvalue:
+                self._log_warning("There is a problem with your variable: {}", _newvalue)
+                _newvalue = ''
+            self._log_debug("Checking variable '{0}', value {1}, listorder {2}",
+                            self.__varname, _newvalue, self.__listorder)
             if 'var:{}'.format(self.__varname) in self.__listorder:
                 self.__listorder[self.__listorder.index('var:{}'.format(self.__varname))] = _newvalue
             values = _newvalue

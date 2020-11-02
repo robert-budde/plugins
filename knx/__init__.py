@@ -74,7 +74,7 @@ DPT='dpt'
 
 class KNX(lib.connection.Client,SmartPlugin):
     ALLOW_MULTIINSTANCE = True
-    PLUGIN_VERSION = "1.6.0"
+    PLUGIN_VERSION = "1.6.2"
 
 
     # tags actually used by the plugin are shown here
@@ -265,7 +265,10 @@ class KNX(lib.connection.Client,SmartPlugin):
             self.terminator = struct.unpack(">H", length)[0]
         except:
             self.logger.error("problem unpacking length: {}".format(length))
+            self.logger.critical("plugin closes connection to knxd/eibd. Restarting SmartHomeNG")
             self.close()
+            self._sh.restart('SmartHomeNG (KNX plugin stalled)')
+            exit(0)
 
     def encode(self, data, dpt):
         return dpts.encode[str(dpt)](data)
